@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -119,15 +120,47 @@ func buildTLSConfigWithECH(serverName string, echList []byte) (*tls.Config, erro
 	if err != nil {
 		return nil, fmt.Errorf("加载系统根证书失败: %w", err)
 	}
-	return &tls.Config{
-		MinVersion:                     tls.VersionTLS13,
-		ServerName:                     serverName,
-		EncryptedClientHelloConfigList: echList,
-		EncryptedClientHelloRejectionVerify: func(cs tls.ConnectionState) error {
-			return errors.New("服务器拒绝 ECH")
-		},
-		RootCAs: roots,
-	}, nil
+
+	if echList == nil || len(echList) == 0 {
+		return nil, errors.New("ECH 配置为空，这是必需功能")
+	}
+
+	config := &tls.Config{
+		MinVersion: tls.VersionTLS13,
+		ServerName: serverName,
+		RootCAs:    roots,
+	}
+
+	// 使用反射设置 ECH 字段（ECH 是核心功能，必须设置成功）
+	if err := setECHConfig(config, echList); err != nil {
+		return nil, fmt.Errorf("设置 ECH 配置失败（需要 Go 1.23+ 或支持 ECH 的版本）: %w", err)
+	}
+
+	return config, nil
+}
+
+// setECHConfig 使用反射设置 ECH 配置（ECH 是核心功能，必须成功）
+func setECHConfig(config *tls.Config, echList []byte) error {
+	configValue := reflect.ValueOf(config).Elem()
+
+	// 设置 EncryptedClientHelloConfigList（必需）
+	field1 := configValue.FieldByName("EncryptedClientHelloConfigList")
+	if !field1.IsValid() || !field1.CanSet() {
+		return fmt.Errorf("EncryptedClientHelloConfigList 字段不可用，需要 Go 1.23+ 版本")
+	}
+	field1.Set(reflect.ValueOf(echList))
+
+	// 设置 EncryptedClientHelloRejectionVerify（必需）
+	field2 := configValue.FieldByName("EncryptedClientHelloRejectionVerify")
+	if !field2.IsValid() || !field2.CanSet() {
+		return fmt.Errorf("EncryptedClientHelloRejectionVerify 字段不可用，需要 Go 1.23+ 版本")
+	}
+	rejectionFunc := func(cs tls.ConnectionState) error {
+		return errors.New("服务器拒绝 ECH")
+	}
+	field2.Set(reflect.ValueOf(rejectionFunc))
+
+	return nil
 }
 
 // queryHTTPSRecord 通过 DoH 查询 HTTPS 记录
@@ -145,7 +178,7 @@ func queryDoH(domain, dohURL string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("无效的 DoH URL: %v", err)
 	}
-	
+
 	dnsQuery := buildDNSQuery(domain, typeHTTPS)
 	dnsBase64 := base64.RawURLEncoding.EncodeToString(dnsQuery)
 
